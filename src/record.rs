@@ -10,6 +10,21 @@ pub enum RecordData {
     Ptr(String),
     Mx { preference: u16, exchange: String },
     Txt(String),
+    Soa {
+        mname: String,
+        rname: String,
+        serial: u32,
+        refresh: u32,
+        retry: u32,
+        expire: u32,
+        minimum: u32,
+    },
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +44,9 @@ pub enum ParseError {
     BadAddress(String),
     BadMxPreference(String),
     BadTxt(String),
+    BadSoaField(&'static str, String),
+    BadSrvField(&'static str, String),
+    TrailingData(String),
 }
 
 impl fmt::Display for ParseError {
@@ -42,6 +60,9 @@ impl fmt::Display for ParseError {
             ParseError::BadAddress(s) => write!(f, "invalid address '{s}'"),
             ParseError::BadMxPreference(s) => write!(f, "invalid MX preference '{s}'"),
             ParseError::BadTxt(s) => write!(f, "invalid TXT data '{s}' (expected a quoted string)"),
+            ParseError::BadSoaField(field, s) => write!(f, "invalid SOA {field} '{s}'"),
+            ParseError::BadSrvField(field, s) => write!(f, "invalid SRV {field} '{s}'"),
+            ParseError::TrailingData(s) => write!(f, "unexpected trailing data '{s}'"),
         }
     }
 }
@@ -67,7 +88,9 @@ fn is_valid_label(label: &str) -> bool {
     if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
         return false;
     }
-    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+    // underscore is not part of the RFC 1035 label alphabet, but it's
+    // standard practice for SRV and other "underscore records" (_sip._tcp, _dmarc, ...)
+    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn is_valid_name(name: &str) -> bool {
@@ -156,6 +179,66 @@ pub fn parse_line(line: &str) -> Result<Record, ParseError> {
             RecordData::Mx { preference, exchange }
         }
         "TXT" => RecordData::Txt(parse_txt(rdata)?),
+        "SOA" => {
+            let (mname_s, rest) = take_token(rdata).ok_or(ParseError::MissingField("soa mname"))?;
+            let mname = parse_target(mname_s)?;
+            let (rname_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa rname"))?;
+            let rname = parse_target(rname_s)?;
+            let (serial_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa serial"))?;
+            let serial: u32 = serial_s
+                .parse()
+                .map_err(|_| ParseError::BadSoaField("serial", serial_s.to_string()))?;
+            let (refresh_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa refresh"))?;
+            let refresh: u32 = refresh_s
+                .parse()
+                .map_err(|_| ParseError::BadSoaField("refresh", refresh_s.to_string()))?;
+            let (retry_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa retry"))?;
+            let retry: u32 = retry_s
+                .parse()
+                .map_err(|_| ParseError::BadSoaField("retry", retry_s.to_string()))?;
+            let (expire_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa expire"))?;
+            let expire: u32 = expire_s
+                .parse()
+                .map_err(|_| ParseError::BadSoaField("expire", expire_s.to_string()))?;
+            let (minimum_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa minimum"))?;
+            let minimum: u32 = minimum_s
+                .parse()
+                .map_err(|_| ParseError::BadSoaField("minimum", minimum_s.to_string()))?;
+            let trailing = rest.trim();
+            if !trailing.is_empty() {
+                return Err(ParseError::TrailingData(trailing.to_string()));
+            }
+            RecordData::Soa {
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            }
+        }
+        "SRV" => {
+            let (priority_s, rest) = take_token(rdata).ok_or(ParseError::MissingField("srv priority"))?;
+            let priority: u16 = priority_s
+                .parse()
+                .map_err(|_| ParseError::BadSrvField("priority", priority_s.to_string()))?;
+            let (weight_s, rest) = take_token(rest).ok_or(ParseError::MissingField("srv weight"))?;
+            let weight: u16 = weight_s
+                .parse()
+                .map_err(|_| ParseError::BadSrvField("weight", weight_s.to_string()))?;
+            let (port_s, rest) = take_token(rest).ok_or(ParseError::MissingField("srv port"))?;
+            let port: u16 = port_s
+                .parse()
+                .map_err(|_| ParseError::BadSrvField("port", port_s.to_string()))?;
+            let target = parse_target(rest.trim())?;
+            RecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            }
+        }
         other => return Err(ParseError::UnknownType(other.to_string())),
     };
 
@@ -176,6 +259,24 @@ impl fmt::Display for Record {
             RecordData::Ptr(target) => ("PTR", target.clone()),
             RecordData::Mx { preference, exchange } => ("MX", format!("{preference} {exchange}")),
             RecordData::Txt(text) => ("TXT", format!("\"{}\"", text.replace('"', "\\\""))),
+            RecordData::Soa {
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            } => (
+                "SOA",
+                format!("{mname} {rname} {serial} {refresh} {retry} {expire} {minimum}"),
+            ),
+            RecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => ("SRV", format!("{priority} {weight} {port} {target}")),
         };
         write!(f, "{:<24} {:<7} IN  {:<6} {}", self.name, self.ttl, rtype, rdata)
     }

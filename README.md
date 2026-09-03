@@ -8,9 +8,9 @@ small parser that reads zone-file style DNS record lines, validates
 them, and reprints them in one consistent format so a diff actually
 shows you what changed.
 
-It understands A, AAAA, CNAME, NS, PTR, MX, and TXT records. That
-covers most of what you'll find in a typical zone file. SOA, SRV, and
-the `$ORIGIN`/`$TTL` directives aren't handled yet.
+It understands A, AAAA, CNAME, NS, PTR, MX, TXT, SOA, and SRV records.
+That covers most of what you'll find in a typical zone file. The
+`$ORIGIN`/`$TTL` directives aren't handled yet.
 
 ## Usage
 
@@ -28,12 +28,16 @@ example.com.      3600 IN A     192.0.2.1
 www.example.com.  3600 IN CNAME example.com.
 example.com.      3600 IN MX    10 mail.example.com.
 example.com.      3600 IN TXT   "v=spf1 -all"
+example.com.      3600 IN SOA   ns1.example.com. admin.example.com. 2024010101 7200 3600 1209600 3600
+_sip._tcp.example.com. 3600 IN SRV 10 60 5060 sipserver.example.com.
 
 $ dns-zone-lint zone.txt
 example.com.             3600    IN  A      192.0.2.1
 www.example.com.         3600    IN  CNAME  example.com.
 example.com.             3600    IN  MX     10 mail.example.com.
 example.com.             3600    IN  TXT    "v=spf1 -all"
+example.com.             3600    IN  SOA    ns1.example.com. admin.example.com. 2024010101 7200 3600 1209600 3600
+_sip._tcp.example.com.   3600    IN  SRV    10 60 5060 sipserver.example.com.
 ```
 
 Bad input is reported with a line number and left off the printed
@@ -55,9 +59,12 @@ syntax:
 - `name` — a domain name, or `@` for the zone origin
 - `ttl` — seconds, as an unsigned 32-bit integer
 - `class` — only `IN` is supported
-- `type` — one of `A`, `AAAA`, `CNAME`, `NS`, `PTR`, `MX`, `TXT`
-- `rdata` — type-specific data (an IP address, a target name, an `MX`
-  preference plus target, or a quoted string for `TXT`)
+- `type` — one of `A`, `AAAA`, `CNAME`, `NS`, `PTR`, `MX`, `TXT`, `SOA`,
+  `SRV`
+- `rdata` — type-specific data: an IP address for `A`/`AAAA`, a target
+  name for `CNAME`/`NS`/`PTR`, a preference plus target for `MX`, a
+  quoted string for `TXT`, `mname rname serial refresh retry expire
+  minimum` for `SOA`, or `priority weight port target` for `SRV`
 
 ## License
 
