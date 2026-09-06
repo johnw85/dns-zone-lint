@@ -1,6 +1,6 @@
 mod record;
 
-use record::parse_line;
+use record::{parse_line, set_default_ttl, set_origin, ZoneContext};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
@@ -20,13 +20,32 @@ fn main() {
         None => io::stdin().lock().lines().filter_map(Result::ok).collect(),
     };
 
+    let mut ctx = ZoneContext::default();
     let mut had_error = false;
     for (i, raw) in lines.iter().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with(';') {
             continue;
         }
-        match parse_line(line) {
+
+        let mut fields = line.splitn(2, char::is_whitespace);
+        let keyword = fields.next().unwrap_or("");
+        let arg = fields.next().unwrap_or("").trim();
+
+        let directive_result = match keyword.to_ascii_uppercase().as_str() {
+            "$ORIGIN" => Some(set_origin(&mut ctx, arg)),
+            "$TTL" => Some(set_default_ttl(&mut ctx, arg)),
+            _ => None,
+        };
+        if let Some(result) = directive_result {
+            if let Err(e) = result {
+                had_error = true;
+                eprintln!("line {}: {e}", i + 1);
+            }
+            continue;
+        }
+
+        match parse_line(line, &ctx) {
             Ok(record) => println!("{record}"),
             Err(e) => {
                 had_error = true;

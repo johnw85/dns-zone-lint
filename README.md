@@ -8,9 +8,9 @@ small parser that reads zone-file style DNS record lines, validates
 them, and reprints them in one consistent format so a diff actually
 shows you what changed.
 
-It understands A, AAAA, CNAME, NS, PTR, MX, TXT, SOA, and SRV records.
-That covers most of what you'll find in a typical zone file. The
-`$ORIGIN`/`$TTL` directives aren't handled yet.
+It understands A, AAAA, CNAME, NS, PTR, MX, TXT, SOA, and SRV records,
+plus the `$ORIGIN` and `$TTL` directives. That covers most of what
+you'll find in a typical zone file.
 
 ## Usage
 
@@ -65,6 +65,34 @@ syntax:
   name for `CNAME`/`NS`/`PTR`, a preference plus target for `MX`, a
   quoted string for `TXT`, `mname rname serial refresh retry expire
   minimum` for `SOA`, or `priority weight port target` for `SRV`
+
+The `ttl` and `class` fields are both optional and can appear in
+either order, same as real zone-file grammar. A record with no `ttl`
+falls back to the most recent `$TTL` directive; a record with no
+`class` is always treated as `IN`.
+
+## Directives
+
+`$ORIGIN <name>` sets the domain that unqualified names (anything not
+ending in a trailing dot, or `@`) get appended to for the rest of the
+file:
+
+```
+$ORIGIN example.com.
+www        3600 IN A     192.0.2.1
+@          3600 IN NS    ns1.example.com.
+```
+
+prints as:
+
+```
+www.example.com.         3600    IN  A      192.0.2.1
+example.com.             3600    IN  NS     ns1.example.com.
+```
+
+`$TTL <seconds>` sets the default ttl for any record line that omits
+one. Both directives apply to every line after them until overridden
+by another directive of the same kind.
 
 ## License
 

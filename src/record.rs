@@ -47,6 +47,31 @@ pub enum ParseError {
     BadSoaField(&'static str, String),
     BadSrvField(&'static str, String),
     TrailingData(String),
+    BadOrigin(String),
+}
+
+/// Tracks the state that `$ORIGIN` and `$TTL` directives carry forward to
+/// later lines in the same zone file.
+#[derive(Debug, Clone, Default)]
+pub struct ZoneContext {
+    pub origin: Option<String>,
+    pub default_ttl: Option<u32>,
+}
+
+pub fn set_origin(ctx: &mut ZoneContext, arg: &str) -> Result<(), ParseError> {
+    let arg = arg.trim();
+    if arg.is_empty() || !is_valid_name(arg) {
+        return Err(ParseError::BadOrigin(arg.to_string()));
+    }
+    ctx.origin = Some(qualify(arg.to_string(), &ctx.origin));
+    Ok(())
+}
+
+pub fn set_default_ttl(ctx: &mut ZoneContext, arg: &str) -> Result<(), ParseError> {
+    let arg = arg.trim();
+    let ttl: u32 = arg.parse().map_err(|_| ParseError::BadTtl(arg.to_string()))?;
+    ctx.default_ttl = Some(ttl);
+    Ok(())
 }
 
 impl fmt::Display for ParseError {
@@ -63,6 +88,7 @@ impl fmt::Display for ParseError {
             ParseError::BadSoaField(field, s) => write!(f, "invalid SOA {field} '{s}'"),
             ParseError::BadSrvField(field, s) => write!(f, "invalid SRV {field} '{s}'"),
             ParseError::TrailingData(s) => write!(f, "unexpected trailing data '{s}'"),
+            ParseError::BadOrigin(s) => write!(f, "invalid $ORIGIN value '{s}'"),
         }
     }
 }
@@ -104,11 +130,34 @@ fn is_valid_name(name: &str) -> bool {
     trimmed.split('.').all(is_valid_label)
 }
 
-fn parse_target(rdata: &str) -> Result<String, ParseError> {
+fn is_record_type(s: &str) -> bool {
+    matches!(
+        s.to_ascii_uppercase().as_str(),
+        "A" | "AAAA" | "CNAME" | "NS" | "PTR" | "MX" | "TXT" | "SOA" | "SRV"
+    )
+}
+
+// A name ending in '.' is already absolute. '@' stands for the current
+// origin. Anything else is relative and gets the origin appended, same as
+// BIND does when reading a zone file.
+fn qualify(name: String, origin: &Option<String>) -> String {
+    if name == "@" {
+        return origin.clone().unwrap_or(name);
+    }
+    if name.ends_with('.') {
+        return name;
+    }
+    match origin {
+        Some(o) => format!("{name}.{o}"),
+        None => name,
+    }
+}
+
+fn parse_target(rdata: &str, ctx: &ZoneContext) -> Result<String, ParseError> {
     if rdata.is_empty() || !is_valid_name(rdata) {
         return Err(ParseError::BadName(rdata.to_string()));
     }
-    Ok(rdata.to_string())
+    Ok(qualify(rdata.to_string(), &ctx.origin))
 }
 
 // TXT data is a double-quoted string; `\"` is the only recognized escape.
@@ -143,20 +192,47 @@ fn parse_txt(rdata: &str) -> Result<String, ParseError> {
 
 /// Parses one zone-file style record line, e.g.
 /// `example.com. 3600 IN A 192.0.2.1`
-pub fn parse_line(line: &str) -> Result<Record, ParseError> {
-    let (name, rest) = take_token(line).ok_or(ParseError::MissingField("name"))?;
-    let (ttl_s, rest) = take_token(rest).ok_or(ParseError::MissingField("ttl"))?;
-    let (class, rest) = take_token(rest).ok_or(ParseError::MissingField("class"))?;
-    let (rtype, rest) = take_token(rest).ok_or(ParseError::MissingField("type"))?;
-    let rdata = rest.trim();
-
+///
+/// The ttl and class fields are both optional and may appear in either
+/// order, matching standard zone-file grammar. A missing ttl falls back to
+/// `ctx.default_ttl` (set by a preceding `$TTL` directive); a missing class
+/// is always treated as `IN`, the only class this tool supports.
+pub fn parse_line(line: &str, ctx: &ZoneContext) -> Result<Record, ParseError> {
+    let (name, mut rest) = take_token(line).ok_or(ParseError::MissingField("name"))?;
     if !is_valid_name(name) {
         return Err(ParseError::BadName(name.to_string()));
     }
-    let ttl: u32 = ttl_s.parse().map_err(|_| ParseError::BadTtl(ttl_s.to_string()))?;
-    if !class.eq_ignore_ascii_case("IN") {
-        return Err(ParseError::UnsupportedClass(class.to_string()));
-    }
+
+    let mut ttl: Option<u32> = None;
+    let mut saw_class = false;
+    let rtype = loop {
+        let (tok, remainder) = take_token(rest).ok_or(ParseError::MissingField("type"))?;
+        if is_record_type(tok) {
+            rest = remainder;
+            break tok;
+        } else if tok.eq_ignore_ascii_case("IN") {
+            if saw_class {
+                return Err(ParseError::TrailingData(tok.to_string()));
+            }
+            saw_class = true;
+            rest = remainder;
+        } else if tok.as_bytes().first().is_some_and(|b| b.is_ascii_digit() || *b == b'-') {
+            if ttl.is_some() {
+                return Err(ParseError::TrailingData(tok.to_string()));
+            }
+            ttl = Some(tok.parse().map_err(|_| ParseError::BadTtl(tok.to_string()))?);
+            rest = remainder;
+        } else {
+            return Err(ParseError::UnsupportedClass(tok.to_string()));
+        }
+    };
+    let rdata = rest.trim();
+
+    let ttl = match ttl.or(ctx.default_ttl) {
+        Some(ttl) => ttl,
+        None => return Err(ParseError::MissingField("ttl")),
+    };
+    let name = qualify(name.to_string(), &ctx.origin);
 
     let data = match rtype.to_ascii_uppercase().as_str() {
         "A" => rdata
@@ -167,23 +243,23 @@ pub fn parse_line(line: &str) -> Result<Record, ParseError> {
             .parse::<Ipv6Addr>()
             .map(RecordData::Aaaa)
             .map_err(|_| ParseError::BadAddress(rdata.to_string()))?,
-        "CNAME" => RecordData::Cname(parse_target(rdata)?),
-        "NS" => RecordData::Ns(parse_target(rdata)?),
-        "PTR" => RecordData::Ptr(parse_target(rdata)?),
+        "CNAME" => RecordData::Cname(parse_target(rdata, ctx)?),
+        "NS" => RecordData::Ns(parse_target(rdata, ctx)?),
+        "PTR" => RecordData::Ptr(parse_target(rdata, ctx)?),
         "MX" => {
             let (pref_s, exchange_s) = take_token(rdata).ok_or(ParseError::MissingField("mx preference"))?;
             let preference: u16 = pref_s
                 .parse()
                 .map_err(|_| ParseError::BadMxPreference(pref_s.to_string()))?;
-            let exchange = parse_target(exchange_s.trim())?;
+            let exchange = parse_target(exchange_s.trim(), ctx)?;
             RecordData::Mx { preference, exchange }
         }
         "TXT" => RecordData::Txt(parse_txt(rdata)?),
         "SOA" => {
             let (mname_s, rest) = take_token(rdata).ok_or(ParseError::MissingField("soa mname"))?;
-            let mname = parse_target(mname_s)?;
+            let mname = parse_target(mname_s, ctx)?;
             let (rname_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa rname"))?;
-            let rname = parse_target(rname_s)?;
+            let rname = parse_target(rname_s, ctx)?;
             let (serial_s, rest) = take_token(rest).ok_or(ParseError::MissingField("soa serial"))?;
             let serial: u32 = serial_s
                 .parse()
@@ -231,7 +307,7 @@ pub fn parse_line(line: &str) -> Result<Record, ParseError> {
             let port: u16 = port_s
                 .parse()
                 .map_err(|_| ParseError::BadSrvField("port", port_s.to_string()))?;
-            let target = parse_target(rest.trim())?;
+            let target = parse_target(rest.trim(), ctx)?;
             RecordData::Srv {
                 priority,
                 weight,
@@ -242,11 +318,7 @@ pub fn parse_line(line: &str) -> Result<Record, ParseError> {
         other => return Err(ParseError::UnknownType(other.to_string())),
     };
 
-    Ok(Record {
-        name: name.to_string(),
-        ttl,
-        data,
-    })
+    Ok(Record { name, ttl, data })
 }
 
 impl fmt::Display for Record {
