@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -48,6 +49,60 @@ pub enum ParseError {
     BadSrvField(&'static str, String),
     TrailingData(String),
     BadOrigin(String),
+}
+
+#[derive(Debug)]
+pub enum ZoneIssue {
+    NoSoa,
+    MultipleSoa(Vec<String>),
+    CnameConflict(String),
+}
+
+impl fmt::Display for ZoneIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZoneIssue::NoSoa => write!(f, "zone: no SOA record found"),
+            ZoneIssue::MultipleSoa(names) => {
+                write!(f, "zone: multiple SOA records ({})", names.join(", "))
+            }
+            ZoneIssue::CnameConflict(name) => write!(
+                f,
+                "zone: '{name}' has a CNAME alongside other records at the same name"
+            ),
+        }
+    }
+}
+
+/// Checks properties that only make sense across the whole zone, as
+/// opposed to `parse_line`'s per-line syntax checks: exactly one SOA
+/// record, and no name that mixes a CNAME with anything else (RFC 1035
+/// 3.6.2 forbids that combination since a CNAME redirects the whole name).
+pub fn check_zone(records: &[Record]) -> Vec<ZoneIssue> {
+    let mut issues = Vec::new();
+
+    let soa_names: Vec<String> = records
+        .iter()
+        .filter(|r| matches!(r.data, RecordData::Soa { .. }))
+        .map(|r| r.name.clone())
+        .collect();
+    match soa_names.len() {
+        0 => issues.push(ZoneIssue::NoSoa),
+        1 => {}
+        _ => issues.push(ZoneIssue::MultipleSoa(soa_names)),
+    }
+
+    let mut by_name: BTreeMap<&str, Vec<&Record>> = BTreeMap::new();
+    for record in records {
+        by_name.entry(record.name.as_str()).or_default().push(record);
+    }
+    for (name, recs) in by_name {
+        let has_cname = recs.iter().any(|r| matches!(r.data, RecordData::Cname(_)));
+        if has_cname && recs.len() > 1 {
+            issues.push(ZoneIssue::CnameConflict(name.to_string()));
+        }
+    }
+
+    issues
 }
 
 /// Tracks the state that `$ORIGIN` and `$TTL` directives carry forward to

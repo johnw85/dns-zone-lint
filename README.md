@@ -51,6 +51,32 @@ line 1: invalid address 'not-an-ip'
 The exit code is nonzero if any line failed to parse, so this is
 usable as a pre-commit check on a zone file.
 
+## Zone-wide checks
+
+A few problems only show up once the whole file has been read, so
+they're checked after every line has parsed rather than per line:
+
+- the zone has no `SOA` record (or more than one)
+- a name has a `CNAME` alongside any other record — a `CNAME` points
+  the whole name elsewhere, so RFC 1035 doesn't allow anything else to
+  live there
+
+These are reported on stderr the same way as parse errors, without a
+line number since they're properties of the zone as a whole, and they
+also make the exit code nonzero:
+
+```
+$ cat zone.txt
+www.example.com. 3600 IN CNAME example.com.
+www.example.com. 3600 IN A     192.0.2.1
+
+$ dns-zone-lint zone.txt
+www.example.com.         3600    IN  CNAME  example.com.
+www.example.com.         3600    IN  A      192.0.2.1
+zone: no SOA record found
+zone: 'www.example.com.' has a CNAME alongside other records at the same name
+```
+
 ## Record format
 
 Each line is `name ttl class type rdata`, matching standard zone-file

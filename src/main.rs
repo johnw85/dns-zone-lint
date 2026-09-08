@@ -1,6 +1,6 @@
 mod record;
 
-use record::{parse_line, set_default_ttl, set_origin, ZoneContext};
+use record::{check_zone, parse_line, set_default_ttl, set_origin, ZoneContext};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
@@ -22,6 +22,7 @@ fn main() {
 
     let mut ctx = ZoneContext::default();
     let mut had_error = false;
+    let mut records = Vec::new();
     for (i, raw) in lines.iter().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with(';') {
@@ -46,12 +47,21 @@ fn main() {
         }
 
         match parse_line(line, &ctx) {
-            Ok(record) => println!("{record}"),
+            Ok(record) => records.push(record),
             Err(e) => {
                 had_error = true;
                 eprintln!("line {}: {e}", i + 1);
             }
         }
+    }
+
+    for record in &records {
+        println!("{record}");
+    }
+
+    for issue in check_zone(&records) {
+        had_error = true;
+        eprintln!("{issue}");
     }
 
     if had_error {
