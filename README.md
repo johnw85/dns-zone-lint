@@ -51,6 +51,15 @@ line 1: invalid address 'not-an-ip'
 The exit code is nonzero if any line failed to parse, so this is
 usable as a pre-commit check on a zone file.
 
+Pass `--json` to get the parsed records as a JSON array on stdout
+instead of the column-aligned text. Parse errors and zone-wide issues
+still go to stderr as plain text either way:
+
+```
+$ dns-zone-lint --json zone.txt
+[{"name":"example.com.","ttl":3600,"type":"A","data":{"address":"192.0.2.1"}},...]
+```
+
 ## Zone-wide checks
 
 A few problems only show up once the whole file has been read, so

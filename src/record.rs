@@ -376,6 +376,79 @@ pub fn parse_line(line: &str, ctx: &ZoneContext) -> Result<Record, ParseError> {
     Ok(Record { name, ttl, data })
 }
 
+// Minimal JSON string escaping: the domain names and rdata this tool
+// produces are almost always plain ASCII, but TXT records can carry
+// arbitrary decoded text, so control characters and quotes still need
+// escaping to keep the output valid.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+impl Record {
+    /// Renders one record as a single-line JSON object, for `--json` output.
+    pub fn to_json(&self) -> String {
+        let name = json_escape(&self.name);
+        let (rtype, data) = match &self.data {
+            RecordData::A(addr) => ("A", format!(r#"{{"address":{}}}"#, json_escape(&addr.to_string()))),
+            RecordData::Aaaa(addr) => ("AAAA", format!(r#"{{"address":{}}}"#, json_escape(&addr.to_string()))),
+            RecordData::Cname(target) => ("CNAME", format!(r#"{{"target":{}}}"#, json_escape(target))),
+            RecordData::Ns(target) => ("NS", format!(r#"{{"target":{}}}"#, json_escape(target))),
+            RecordData::Ptr(target) => ("PTR", format!(r#"{{"target":{}}}"#, json_escape(target))),
+            RecordData::Mx { preference, exchange } => (
+                "MX",
+                format!(r#"{{"preference":{},"exchange":{}}}"#, preference, json_escape(exchange)),
+            ),
+            RecordData::Txt(text) => ("TXT", format!(r#"{{"text":{}}}"#, json_escape(text))),
+            RecordData::Soa {
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            } => (
+                "SOA",
+                format!(
+                    r#"{{"mname":{},"rname":{},"serial":{serial},"refresh":{refresh},"retry":{retry},"expire":{expire},"minimum":{minimum}}}"#,
+                    json_escape(mname),
+                    json_escape(rname),
+                ),
+            ),
+            RecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => (
+                "SRV",
+                format!(
+                    r#"{{"priority":{priority},"weight":{weight},"port":{port},"target":{}}}"#,
+                    json_escape(target)
+                ),
+            ),
+        };
+        format!(
+            r#"{{"name":{name},"ttl":{},"type":"{rtype}","data":{data}}}"#,
+            self.ttl
+        )
+    }
+}
+
 impl fmt::Display for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (rtype, rdata) = match &self.data {

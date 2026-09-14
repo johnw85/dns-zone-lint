@@ -1,6 +1,6 @@
 mod record;
 
-use record::{check_zone, parse_line, set_default_ttl, set_origin, ZoneContext};
+use record::{check_zone, parse_line, set_default_ttl, set_origin, Record, ZoneContext};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
@@ -9,7 +9,17 @@ use std::process;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let lines: Vec<String> = match args.get(1) {
+    let mut json_output = false;
+    let mut path: Option<&str> = None;
+    for arg in &args[1..] {
+        if arg == "--json" {
+            json_output = true;
+        } else {
+            path = Some(arg);
+        }
+    }
+
+    let lines: Vec<String> = match path {
         Some(path) => match fs::read_to_string(path) {
             Ok(content) => content.lines().map(str::to_string).collect(),
             Err(e) => {
@@ -55,8 +65,13 @@ fn main() {
         }
     }
 
-    for record in &records {
-        println!("{record}");
+    if json_output {
+        let body: Vec<String> = records.iter().map(Record::to_json).collect();
+        println!("[{}]", body.join(","));
+    } else {
+        for record in &records {
+            println!("{record}");
+        }
     }
 
     for issue in check_zone(&records) {
