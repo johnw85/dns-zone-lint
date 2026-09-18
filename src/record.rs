@@ -481,3 +481,272 @@ impl fmt::Display for Record {
         write!(f, "{:<24} {:<7} IN  {:<6} {}", self.name, self.ttl, rtype, rdata)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn soa_record(name: &str) -> Record {
+        Record {
+            name: name.to_string(),
+            ttl: 3600,
+            data: RecordData::Soa {
+                mname: "ns1.example.com.".to_string(),
+                rname: "admin.example.com.".to_string(),
+                serial: 1,
+                refresh: 7200,
+                retry: 3600,
+                expire: 1_209_600,
+                minimum: 3600,
+            },
+        }
+    }
+
+    #[test]
+    fn parses_a_record() {
+        let record = parse_line("example.com. 3600 IN A 192.0.2.1", &ZoneContext::default()).unwrap();
+        assert_eq!(record.name, "example.com.");
+        assert_eq!(record.ttl, 3600);
+        assert_eq!(record.data, RecordData::A("192.0.2.1".parse::<Ipv4Addr>().unwrap()));
+    }
+
+    #[test]
+    fn parses_mx_record_with_preference() {
+        let record = parse_line("example.com. 3600 IN MX 10 mail.example.com.", &ZoneContext::default()).unwrap();
+        assert_eq!(
+            record.data,
+            RecordData::Mx {
+                preference: 10,
+                exchange: "mail.example.com.".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_name() {
+        let err = parse_line("   ", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::MissingField("name")));
+    }
+
+    #[test]
+    fn rejects_missing_ttl_with_no_default() {
+        let err = parse_line("example.com. A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::MissingField("ttl")));
+    }
+
+    #[test]
+    fn falls_back_to_default_ttl_directive() {
+        let mut ctx = ZoneContext::default();
+        set_default_ttl(&mut ctx, "1800").unwrap();
+        let record = parse_line("example.com. A 192.0.2.1", &ctx).unwrap();
+        assert_eq!(record.ttl, 1800);
+    }
+
+    #[test]
+    fn rejects_negative_ttl() {
+        let err = parse_line("example.com. -5 IN A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadTtl(s) if s == "-5"));
+    }
+
+    #[test]
+    fn rejects_ttl_overflowing_u32() {
+        let err = parse_line("example.com. 4294967296 IN A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadTtl(s) if s == "4294967296"));
+    }
+
+    #[test]
+    fn rejects_duplicate_ttl() {
+        let err = parse_line("example.com. 3600 1800 IN A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::TrailingData(s) if s == "1800"));
+    }
+
+    #[test]
+    fn rejects_duplicate_class() {
+        let err = parse_line("example.com. 3600 IN IN A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::TrailingData(s) if s == "IN"));
+    }
+
+    #[test]
+    fn rejects_unsupported_class() {
+        let err = parse_line("example.com. 3600 CH A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::UnsupportedClass(s) if s == "CH"));
+    }
+
+    #[test]
+    fn rejects_name_with_leading_hyphen_label() {
+        let err = parse_line("-bad-.example.com. 3600 IN A 192.0.2.1", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadName(s) if s == "-bad-.example.com."));
+    }
+
+    #[test]
+    fn rejects_cname_target_with_invalid_label() {
+        let err = parse_line("www.example.com. 3600 IN CNAME -bad-.example.com.", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadName(s) if s == "-bad-.example.com."));
+    }
+
+    #[test]
+    fn rejects_bad_ipv4_address() {
+        let err = parse_line("example.com. 3600 IN A not-an-ip", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadAddress(s) if s == "not-an-ip"));
+    }
+
+    #[test]
+    fn rejects_bad_ipv6_address() {
+        let err = parse_line("example.com. 3600 IN AAAA not-an-ip", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadAddress(s) if s == "not-an-ip"));
+    }
+
+    #[test]
+    fn rejects_non_numeric_mx_preference() {
+        let err = parse_line("example.com. 3600 IN MX ten mail.example.com.", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadMxPreference(s) if s == "ten"));
+    }
+
+    #[test]
+    fn rejects_mx_with_no_exchange() {
+        let err = parse_line("example.com. 3600 IN MX 10", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadName(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn rejects_txt_without_quotes() {
+        let err = parse_line("example.com. 3600 IN TXT hello", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadTxt(s) if s == "hello"));
+    }
+
+    #[test]
+    fn rejects_txt_missing_closing_quote() {
+        let err = parse_line("example.com. 3600 IN TXT \"unterminated", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadTxt(s) if s == "\"unterminated"));
+    }
+
+    #[test]
+    fn rejects_txt_with_unescaped_inner_quote() {
+        let err = parse_line("example.com. 3600 IN TXT \"foo\"bar\"", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadTxt(_)));
+    }
+
+    #[test]
+    fn rejects_soa_with_missing_fields() {
+        let err = parse_line(
+            "example.com. 3600 IN SOA ns1.example.com. admin.example.com. 2024010101 7200 3600",
+            &ZoneContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::MissingField("soa expire")));
+    }
+
+    #[test]
+    fn rejects_soa_with_non_numeric_serial() {
+        let err = parse_line(
+            "example.com. 3600 IN SOA ns1.example.com. admin.example.com. abc 7200 3600 1209600 3600",
+            &ZoneContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::BadSoaField("serial", s) if s == "abc"));
+    }
+
+    #[test]
+    fn rejects_soa_with_trailing_data() {
+        let err = parse_line(
+            "example.com. 3600 IN SOA ns1.example.com. admin.example.com. 2024010101 7200 3600 1209600 3600 extra",
+            &ZoneContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::TrailingData(s) if s == "extra"));
+    }
+
+    #[test]
+    fn rejects_srv_with_non_numeric_priority() {
+        let err = parse_line(
+            "_sip._tcp.example.com. 3600 IN SRV abc 60 5060 sipserver.example.com.",
+            &ZoneContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::BadSrvField("priority", s) if s == "abc"));
+    }
+
+    #[test]
+    fn rejects_srv_with_no_target() {
+        let err = parse_line("_sip._tcp.example.com. 3600 IN SRV 10 60 5060", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::BadName(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn rejects_empty_origin_directive() {
+        let mut ctx = ZoneContext::default();
+        let err = set_origin(&mut ctx, "   ").unwrap_err();
+        assert!(matches!(err, ParseError::BadOrigin(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn rejects_origin_with_invalid_label() {
+        let mut ctx = ZoneContext::default();
+        let err = set_origin(&mut ctx, "-bad-").unwrap_err();
+        assert!(matches!(err, ParseError::BadOrigin(s) if s == "-bad-"));
+    }
+
+    #[test]
+    fn rejects_non_numeric_ttl_directive() {
+        let mut ctx = ZoneContext::default();
+        let err = set_default_ttl(&mut ctx, "abc").unwrap_err();
+        assert!(matches!(err, ParseError::BadTtl(s) if s == "abc"));
+    }
+
+    #[test]
+    fn origin_qualifies_relative_names() {
+        let mut ctx = ZoneContext::default();
+        set_origin(&mut ctx, "example.com.").unwrap();
+        let record = parse_line("www 3600 IN A 192.0.2.1", &ctx).unwrap();
+        assert_eq!(record.name, "www.example.com.");
+    }
+
+    #[test]
+    fn zone_flags_missing_soa() {
+        let records = vec![Record {
+            name: "example.com.".to_string(),
+            ttl: 3600,
+            data: RecordData::A(Ipv4Addr::new(192, 0, 2, 1)),
+        }];
+        assert!(matches!(check_zone(&records).as_slice(), [ZoneIssue::NoSoa]));
+    }
+
+    #[test]
+    fn zone_flags_multiple_soa() {
+        let records = vec![soa_record("example.com."), soa_record("example.org.")];
+        let issues = check_zone(&records);
+        assert!(matches!(issues.as_slice(), [ZoneIssue::MultipleSoa(names)] if names.len() == 2));
+    }
+
+    #[test]
+    fn zone_flags_cname_conflict() {
+        let records = vec![
+            soa_record("example.com."),
+            Record {
+                name: "www.example.com.".to_string(),
+                ttl: 3600,
+                data: RecordData::Cname("example.com.".to_string()),
+            },
+            Record {
+                name: "www.example.com.".to_string(),
+                ttl: 3600,
+                data: RecordData::A(Ipv4Addr::new(192, 0, 2, 1)),
+            },
+        ];
+        let issues = check_zone(&records);
+        assert!(matches!(issues.as_slice(), [ZoneIssue::CnameConflict(name)] if name == "www.example.com."));
+    }
+
+    #[test]
+    fn zone_with_soa_and_no_conflicts_has_no_issues() {
+        let records = vec![
+            soa_record("example.com."),
+            Record {
+                name: "www.example.com.".to_string(),
+                ttl: 3600,
+                data: RecordData::A(Ipv4Addr::new(192, 0, 2, 1)),
+            },
+        ];
+        assert!(check_zone(&records).is_empty());
+    }
+}
