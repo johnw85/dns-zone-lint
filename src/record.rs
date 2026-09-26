@@ -192,6 +192,14 @@ fn is_record_type(s: &str) -> bool {
     )
 }
 
+// RFC 1035 3.2.4 defines exactly these four classes. "IN" is handled
+// separately in the field loop since it's the only one this tool accepts;
+// this covers the other three so they're reported as unsupported rather
+// than mistaken for an unknown record type.
+fn is_record_class(s: &str) -> bool {
+    matches!(s.to_ascii_uppercase().as_str(), "CS" | "CH" | "HS")
+}
+
 // A name ending in '.' is already absolute. '@' stands for the current
 // origin. Anything else is relative and gets the origin appended, same as
 // BIND does when reading a zone file.
@@ -271,6 +279,8 @@ pub fn parse_line(line: &str, ctx: &ZoneContext) -> Result<Record, ParseError> {
             }
             saw_class = true;
             rest = remainder;
+        } else if is_record_class(tok) {
+            return Err(ParseError::UnsupportedClass(tok.to_string()));
         } else if tok.as_bytes().first().is_some_and(|b| b.is_ascii_digit() || *b == b'-') {
             if ttl.is_some() {
                 return Err(ParseError::TrailingData(tok.to_string()));
@@ -278,7 +288,7 @@ pub fn parse_line(line: &str, ctx: &ZoneContext) -> Result<Record, ParseError> {
             ttl = Some(tok.parse().map_err(|_| ParseError::BadTtl(tok.to_string()))?);
             rest = remainder;
         } else {
-            return Err(ParseError::UnsupportedClass(tok.to_string()));
+            return Err(ParseError::UnknownType(tok.to_string()));
         }
     };
     let rdata = rest.trim();
@@ -570,6 +580,12 @@ mod tests {
     fn rejects_unsupported_class() {
         let err = parse_line("example.com. 3600 CH A 192.0.2.1", &ZoneContext::default()).unwrap_err();
         assert!(matches!(err, ParseError::UnsupportedClass(s) if s == "CH"));
+    }
+
+    #[test]
+    fn rejects_unknown_record_type() {
+        let err = parse_line("example.com. 3600 IN HINFO \"foo\" \"bar\"", &ZoneContext::default()).unwrap_err();
+        assert!(matches!(err, ParseError::UnknownType(s) if s == "HINFO"));
     }
 
     #[test]
