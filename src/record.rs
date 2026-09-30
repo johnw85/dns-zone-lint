@@ -765,4 +765,119 @@ mod tests {
         ];
         assert!(check_zone(&records).is_empty());
     }
+
+    fn json_for(line: &str) -> String {
+        parse_line(line, &ZoneContext::default()).unwrap().to_json()
+    }
+
+    #[test]
+    fn json_a_record() {
+        assert_eq!(
+            json_for("example.com. 3600 IN A 192.0.2.1"),
+            r#"{"name":"example.com.","ttl":3600,"type":"A","data":{"address":"192.0.2.1"}}"#
+        );
+    }
+
+    #[test]
+    fn json_aaaa_record_uses_compressed_address() {
+        assert_eq!(
+            json_for("example.com. 300 IN AAAA 2001:db8:0:0:0:0:0:1"),
+            r#"{"name":"example.com.","ttl":300,"type":"AAAA","data":{"address":"2001:db8::1"}}"#
+        );
+    }
+
+    #[test]
+    fn json_target_records() {
+        assert_eq!(
+            json_for("www.example.com. 300 IN CNAME example.com."),
+            r#"{"name":"www.example.com.","ttl":300,"type":"CNAME","data":{"target":"example.com."}}"#
+        );
+        assert_eq!(
+            json_for("example.com. 300 IN NS ns1.example.com."),
+            r#"{"name":"example.com.","ttl":300,"type":"NS","data":{"target":"ns1.example.com."}}"#
+        );
+        assert_eq!(
+            json_for("1.2.0.192.in-addr.arpa. 300 IN PTR host.example.com."),
+            r#"{"name":"1.2.0.192.in-addr.arpa.","ttl":300,"type":"PTR","data":{"target":"host.example.com."}}"#
+        );
+    }
+
+    #[test]
+    fn json_mx_preference_is_a_number() {
+        assert_eq!(
+            json_for("example.com. 3600 IN MX 10 mail.example.com."),
+            r#"{"name":"example.com.","ttl":3600,"type":"MX","data":{"preference":10,"exchange":"mail.example.com."}}"#
+        );
+    }
+
+    #[test]
+    fn json_txt_escapes_quotes_and_backslashes() {
+        let record = Record {
+            name: "example.com.".to_string(),
+            ttl: 60,
+            data: RecordData::Txt("say \"hi\" \\ there".to_string()),
+        };
+        assert_eq!(
+            record.to_json(),
+            r#"{"name":"example.com.","ttl":60,"type":"TXT","data":{"text":"say \"hi\" \\ there"}}"#
+        );
+    }
+
+    #[test]
+    fn json_txt_escapes_control_characters() {
+        let record = Record {
+            name: "example.com.".to_string(),
+            ttl: 60,
+            data: RecordData::Txt("a\tb\nc\u{1}".to_string()),
+        };
+        assert_eq!(
+            record.to_json(),
+            r#"{"name":"example.com.","ttl":60,"type":"TXT","data":{"text":"a\tb\nc\u0001"}}"#
+        );
+    }
+
+    #[test]
+    fn json_txt_keeps_non_ascii_text_verbatim() {
+        let record = Record {
+            name: "example.com.".to_string(),
+            ttl: 60,
+            data: RecordData::Txt("caf\u{e9}".to_string()),
+        };
+        assert!(record.to_json().contains("\"text\":\"caf\u{e9}\""));
+    }
+
+    #[test]
+    fn json_soa_record() {
+        assert_eq!(
+            json_for("example.com. 3600 IN SOA ns1.example.com. admin.example.com. 2024010101 7200 3600 1209600 300"),
+            concat!(
+                r#"{"name":"example.com.","ttl":3600,"type":"SOA","data":{"mname":"ns1.example.com.","#,
+                r#""rname":"admin.example.com.","serial":2024010101,"refresh":7200,"retry":3600,"#,
+                r#""expire":1209600,"minimum":300}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn json_srv_record() {
+        assert_eq!(
+            json_for("_sip._tcp.example.com. 3600 IN SRV 10 60 5060 sipserver.example.com."),
+            concat!(
+                r#"{"name":"_sip._tcp.example.com.","ttl":3600,"type":"SRV","data":{"priority":10,"#,
+                r#""weight":60,"port":5060,"target":"sipserver.example.com."}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn json_uses_qualified_name_and_default_ttl() {
+        let mut ctx = ZoneContext::default();
+        set_origin(&mut ctx, "example.com.").unwrap();
+        set_default_ttl(&mut ctx, "900").unwrap();
+        let record = parse_line("www A 192.0.2.7", &ctx).unwrap();
+        assert_eq!(
+            record.to_json(),
+            r#"{"name":"www.example.com.","ttl":900,"type":"A","data":{"address":"192.0.2.7"}}"#
+        );
+    }
 }
